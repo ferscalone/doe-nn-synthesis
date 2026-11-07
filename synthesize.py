@@ -36,13 +36,15 @@ def load_model(path, device):
     return model
 
 
-def _score(phi, targets_u8, norm):
+def _score(phi, targets_u8, norm, robust=False):
     _, s, _ = evaluate_doe(phase_to_uint8(phi.cpu().numpy()), targets_u8, norm=norm, verbose=False)
+    if robust:          # устойчивый режим: лучший тот, у кого выше худший из двух способов нормировки
+        return min(s["ssim_fit_mean"], s["ssim_frame_mean"]) + s["pcc_mean"], s
     return s["pcc_mean"] + s["ssim_mean"], s
 
 
 def synthesize(targets_u8, method="best", ckpt=None, refine=1000, iters=300, lr=0.05, device="cpu",
-               w_eff=0.0, restarts=2, norm="best", model=None, verbose=True):
+               w_eff=0.0, restarts=2, norm="best", model=None, verbose=True, w_frame=0.0):
     t = torch.tensor(targets_u8 / 255.0, dtype=torch.float32, device=device)
     prop = Fresnel().to(device)
     timing = {}
@@ -52,17 +54,18 @@ def synthesize(targets_u8, method="best", ckpt=None, refine=1000, iters=300, lr=
             model.predict_phase(t[None])                  # прогрев
         phi, timing["nn_sec"] = timed(lambda: model.predict_phase(t[None])[0])
         if method == "nn+refine" and refine > 0:
-            phi, timing["refine_sec"] = timed(optimize_phase, t, prop, iters=refine, lr=lr, init=phi, w_eff=w_eff)
+            phi, timing["refine_sec"] = timed(optimize_phase, t, prop, iters=refine, lr=lr, init=phi, w_eff=w_eff,
+                                              w_frame=w_frame)
         elif method == "best":
             t0 = time.perf_counter()
             starts = [("нейросеть", phi)] + [(f"случайный {i + 1}", None) for i in range(restarts)]
             best = None
             for j, (name, init) in enumerate(starts):
                 cand = optimize_phase(t, prop, iters=refine, lr=lr, init=init, seed=100 + j,
-                                      w_eff=w_eff, cosine=True)
+                                      w_eff=w_eff, cosine=True, w_frame=w_frame)
                 _, s0 = _score(cand, targets_u8, norm)
-                cand = polish_quantized(cand, t, prop, w_eff=w_eff)
-                sc, s = _score(cand, targets_u8, norm)
+                cand = polish_quantized(cand, t, prop, w_eff=w_eff, w_frame=w_frame)
+                sc, s = _score(cand, targets_u8, norm, robust=w_frame > 0)
                 if verbose:
                     print(f"[best] старт «{name}»: КК {s['pcc_mean']:.5f}  ИСС {s['ssim_mean']:.5f}  "
                           f"(до учёта квантования ИСС {s0['ssim_mean']:.5f})")
@@ -87,23 +90,25 @@ def main():
     p.add_argument("--files", nargs=4, default=None, help="4 файла вместо папки (по порядку 1..4)")
     p.add_argument("--ckpt", default="weights/doe_unrolled_v2.pt")
     p.add_argument("--method", default="best", choices=["nn", "nn+refine", "best", "adam", "gs"])
-    p.add_argument("--refine", type=int, default=1000, help="шагов доводки (nn+refine, best)")
-    p.add_argument("--restarts", type=int, default=2, help="best: сколько дополнительных случайных стартов")
+    p.add_argument("--refine", type=int, default=2000, help="шагов доводки (nn+refine, best)")
+    p.add_argument("--restarts", type=int, default=0, help="best: сколько дополнительных случайных стартов")
     p.add_argument("--iters", type=int, default=300, help="шагов для adam / gs")
     p.add_argument("--lr", type=float, default=0.05)
-    p.add_argument("--norm", default=None, choices=["fit", "max", "best"],
-                   help="яркость восстановленных png: fit (МНК), best (максимум ИСС), max (без цели). "
-                        "По умолчанию best для --method best, иначе fit")
+    p.add_argument("--norm", default=None, choices=["fit", "max", "best", "frame"],
+                   help="яркость восстановленных png: frame (максимум кадра -> 255), fit (МНК), best (максимум ИСС), max (максимум области). "
+                        "По умолчанию frame")
     p.add_argument("--w_eff", type=float, default=0.0, help="штраф за свет вне областей при доводке")
+    p.add_argument("--w_frame", type=float, default=0.5,
+                   help="вес ошибки при нормировке по всему кадру (устойчивость к нормировке у жюри; run.py: 0.5)")
     p.add_argument("--out", default="results")
     p.add_argument("--cpu", action="store_true")
     a = p.parse_args()
     device = "cuda" if torch.cuda.is_available() and not a.cpu else "cpu"
-    norm = a.norm or ("best" if a.method == "best" else "fit")
+    norm = a.norm or ("frame" if a.w_frame > 0 or a.method == "nn" else "best")
 
     targets = load_targets(a.images, a.files)
     phi, timing = synthesize(targets, a.method, a.ckpt, a.refine, a.iters, a.lr, device, a.w_eff,
-                             a.restarts, norm)
+                             a.restarts, norm, w_frame=a.w_frame)
     doe_u8 = phase_to_uint8(phi)
     print(f"[synth] метод: {a.method}, устройство: {device}, время: " +
           ", ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in timing.items()))

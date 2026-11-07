@@ -11,15 +11,22 @@
 
 Выход (--output), для каждого комплекта папка <комплект>/:
   doe.png                  фазовый ДОЭ: PNG 128x128, 8 бит, grayscale; 0 = -pi, 255 = +pi
-  rec_1.png .. rec_4.png   восстановленные изображения (модуль поля, Френель с одним БПФ)
+  rec_1.png .. rec_4.png   восстановленные изображения (модуль поля, Френель с одним БПФ),
+                           нормированы на максимум всего кадра -> 255 (стандартно, без знания цели)
   metrics.csv / .json      SSIM и Pearson по информативным областям
 и общие файлы summary.csv (по комплектам + среднее) и timing.json.
 
 Режимы (--mode):
   fast      только нейросеть (один проход)
-  balanced  нейросеть + 300 шагов доводки + дискретная доводка 8-битного ДОЭ
-  best      нейросеть + 1000 шагов доводки + дискретная доводка 8-битного ДОЭ  [по умолчанию]
-  max       как best + ещё 2 запасных старта со случайных фаз (≈3 раза дольше)
+  balanced  нейросеть + 800 шагов устойчивой доводки + дискретная доводка 8-битного ДОЭ
+  best      нейросеть + 2000 шагов устойчивой доводки + дискретная доводка 8-битного ДОЭ  [по умолчанию]
+  max       нейросеть + 4000 шагов устойчивой доводки + дискретная доводка (ещё точнее, вдвое дольше)
+  best_roi  прежний вариант: 1000 шагов без устойчивости - максимум SSIM, если яркость
+            восстановления подбирается по информативной области, но плохо при нормировке по кадру
+
+«Устойчивая» доводка оптимизирует ДОЭ сразу под два способа перевести модуль поля в 8 бит:
+с подбором яркости по информативной области и с нормировкой на максимум всего кадра
+(как mat2gray). Тогда результат не зависит от того, как именно нормирует проверяющий.
 """
 import argparse
 import csv
@@ -36,11 +43,13 @@ from doe.evaluate import evaluate_doe, load_targets
 from doe.physics import ROI, phase_to_uint8
 from synthesize import load_model, synthesize
 
-MODES = {  # режим -> (метод synthesize, шагов доводки, запасных стартов)
-    "fast": ("nn", 0, 0),
-    "balanced": ("best", 300, 0),
-    "best": ("best", 1000, 0),
-    "max": ("best", 1000, 2),
+W_FRAME = 0.5   # вес ошибки «нормировка по всему кадру» (подобран на dataset/samples, см. docs/tuning.md)
+MODES = {  # режим -> (метод synthesize, шагов доводки, запасных стартов, w_frame, нормировка png)
+    "fast": ("nn", 0, 0, 0.0, "frame"),
+    "balanced": ("best", 800, 0, W_FRAME, "frame"),
+    "best": ("best", 2000, 0, W_FRAME, "frame"),
+    "max": ("best", 4000, 0, W_FRAME, "frame"),
+    "best_roi": ("best", 1000, 0, 0.0, "best"),
 }
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_WEIGHTS = os.path.join(HERE, "weights", "doe_unrolled_v2.pt")
@@ -104,7 +113,7 @@ def main():
     device = "cuda" if (a.device == "cuda" or (a.device == "auto" and torch.cuda.is_available())) else "cpu"
     if a.threads > 0:
         torch.set_num_threads(a.threads)
-    method, refine, restarts = MODES[a.mode]
+    method, refine, restarts, w_frame, norm = MODES[a.mode]
     if a.refine is not None:
         refine = a.refine
     kits = find_kits(a.input)
@@ -128,7 +137,7 @@ def main():
             torch.cuda.synchronize()
         t0 = time.perf_counter()
         phi, _ = synthesize(targets, method, refine=refine, restarts=restarts, device=device, model=model,
-                            verbose=False)
+                            verbose=False, w_frame=w_frame, norm=norm)
         doe_u8 = phase_to_uint8(phi)
         dt = time.perf_counter() - t0
         times[name] = dt
@@ -139,14 +148,17 @@ def main():
             save_gray(os.path.join(out, "doe.png"), doe_u8)
             print(f"[run] {name}: {dt:.2f} с")
             continue
-        per, s, _ = evaluate_doe(doe_u8, targets, out_dir=out, norm="best", verbose=False)
+        per, s, _ = evaluate_doe(doe_u8, targets, out_dir=out, norm=norm, verbose=False)
         row = {"kit": name, "ssim": s["ssim_mean"], "pearson": s["pcc_mean"],
+               "ssim_frame_norm": s["ssim_frame_mean"], "ssim_roi_fit": s["ssim_fit_mean"],
                "ssim_global": s["ssim_global_mean"], "ssim_matlab": s["ssim_matlab_mean"]}
         if "ssim_skimage_default" in per[0]:
             row["ssim_skimage_default"] = float(np.mean([r["ssim_skimage_default"] for r in per]))
         row["time_sec"] = dt
         rows.append(row)
-        print(f"[run] {name:24s} SSIM {row['ssim']:.4f}  Pearson {row['pearson']:.4f}  время {dt:.2f} с", flush=True)
+        print(f"[run] {name:24s} SSIM {row['ssim']:.4f}  Pearson {row['pearson']:.4f}  "
+              f"(SSIM при нормировке по кадру {row['ssim_frame_norm']:.4f}, по области {row['ssim_roi_fit']:.4f})  "
+              f"время {dt:.2f} с", flush=True)
 
     total = sum(times.values())
     if rows:
@@ -158,6 +170,8 @@ def main():
             w.writerows(rows + [mean])
         print(f"[run] СРЕДНЕЕ по {len(rows)} комплектам: SSIM {mean['ssim']:.4f}, Pearson {mean['pearson']:.4f}, "
               f"время {mean['time_sec']:.2f} с на комплект")
+        print(f"[run]   SSIM при нормировке по кадру {mean['ssim_frame_norm']:.4f}, "
+              f"при подборе яркости по области {mean['ssim_roi_fit']:.4f}")
         print("[run] SSIM - гауссово окно 11x11 (как skimage gaussian_weights=True); варианты по формуле со слайда, "
               "MATLAB и skimage по умолчанию - в summary.csv")
     with open(os.path.join(a.output, "timing.json"), "w", encoding="utf-8") as f:

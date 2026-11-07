@@ -41,6 +41,7 @@ def amplitude_to_uint8(amp, target_u8, roi, mode="fit"):
     fit: яркость подбирается методом наименьших квадратов по информативной
          области (как подбор экспозиции камеры); КК от этого не зависит.
     max: максимум модуля в информативной области -> 255 (без знания цели).
+    frame: максимум модуля во всём кадре 128x128 -> 255 (как mat2gray; без знания цели).
     best: как fit, но «экспозиция» уточняется перебором (±20%) так, чтобы сумма
           ИСС (оконного и глобального со слайда) 8-битной картинки была
           максимальной (КК от этого не меняется)."""
@@ -56,6 +57,8 @@ def amplitude_to_uint8(amp, target_u8, roi, mode="fit"):
                 q = np.clip(np.round(a * x), 0, 255)
                 scores.append(ssim_np(q, t) + ssim_global_np(q, t))
             s = cands[int(np.argmax(scores))]
+    elif mode == "frame":
+        s = 255.0 / (amp.max() + 1e-12)
     else:
         s = 255.0 / (a.max() + 1e-12)
     return np.clip(np.round(amp * s), 0, 255).astype(np.uint8)
@@ -83,11 +86,19 @@ def evaluate_doe(doe_u8, targets_u8, out_dir=None, norm="fit", fftshift=True, ve
         sk = ssim_skimage(roi_crop_np(recs)[k], roi_crop_np(targets_u8)[k])
         if sk:
             row.update(sk)
+        # те же метрики при двух других способах перевести |K| в 8 бит (независимо от norm):
+        r_, c_ = ROI_INCLUSIVE[k]
+        for tag, md in (("_fit", "fit"), ("_frame", "frame")):
+            img = amplitude_to_uint8(amps[k], targets_u8[k], ROI_INCLUSIVE[k], md)
+            row["pcc" + tag] = pcc_np(img[r_, c_], targets_u8[k][r_, c_])
+            row["ssim" + tag] = ssim_np(img[r_, c_], targets_u8[k][r_, c_])
         rows.append(row)
     summary = {"pcc_mean": float(np.mean([r["pcc"] for r in rows])),
                "ssim_mean": float(np.mean([r["ssim"] for r in rows])),
                "ssim_global_mean": float(np.mean([r["ssim_global"] for r in rows])),
-               "ssim_matlab_mean": float(np.mean([r["ssim_matlab"] for r in rows]))}
+               "ssim_matlab_mean": float(np.mean([r["ssim_matlab"] for r in rows])),
+               "ssim_fit_mean": float(np.mean([r["ssim_fit"] for r in rows])),
+               "ssim_frame_mean": float(np.mean([r["ssim_frame"] for r in rows]))}
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
         save_gray(os.path.join(out_dir, "doe.png"), doe_u8)

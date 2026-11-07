@@ -66,12 +66,27 @@ def efficiency(amp_full, amp_roi):
     return (amp_roi ** 2).sum(dim=(-2, -1)) / ((amp_full ** 2).sum(dim=(-2, -1)) + 1e-12)
 
 
-def full_loss(amp_full, tgt_roi, rois, w_eff=0.0):
+def frame_norm_loss(amp_full, tgt_roi, rois):
+    """Та же ошибка, но восстановление нормировано на максимум ВСЕГО кадра каждой
+    плоскости (как сделал бы mat2gray / a / a.max()), без подбора яркости.
+    Заставляет держать свет вне информативных областей не ярче нужного уровня -
+    тогда метрики не зависят от того, как жюри нормирует восстановление."""
+    from .physics import roi_crop
+    a = roi_crop(amp_full / (amp_full.amax(dim=(-2, -1), keepdim=True) + 1e-8), rois)
+    return 10 * ((a - tgt_roi) ** 2).mean() + (1 - pcc_torch(a, tgt_roi).mean()) \
+        + (1 - ssim_torch(a, tgt_roi, data_range=1.0).mean())
+
+
+def full_loss(amp_full, tgt_roi, rois, w_eff=0.0, w_frame=0.0):
     """doe_loss + необязательный штраф за низкую эффективность (w_eff > 0
-    заставляет держать свет внутри областей ценой небольшой потери метрик)."""
+    заставляет держать свет внутри областей ценой небольшой потери метрик)
+    + необязательная ошибка при нормировке по всему кадру (w_frame > 0,
+    используется в доводке для устойчивости к способу нормировки у жюри)."""
     from .physics import roi_crop
     amp_roi = roi_crop(amp_full, rois)
     loss, m = doe_loss(amp_roi, tgt_roi)
+    if w_frame > 0:
+        loss = loss + w_frame * frame_norm_loss(amp_full, tgt_roi, rois)
     if w_eff > 0:
         eff = efficiency(amp_full, amp_roi).mean()
         loss = loss + w_eff * (1 - eff)

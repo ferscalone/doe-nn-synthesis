@@ -41,7 +41,7 @@ def gerchberg_saxton(tgt, prop: Fresnel, iters=200, rois=ROI, seed=0, callback=N
 
 
 def optimize_phase(tgt, prop: Fresnel, iters=300, lr=0.05, init=None, rois=ROI, seed=0,
-                   callback=None, w_eff=0.0, cosine=False, decay_frac=0.3, warmup=None):
+                   callback=None, w_eff=0.0, cosine=False, decay_frac=0.3, warmup=None, w_frame=0.0):
     """Прямая оптимизация фазы ДОЭ градиентным спуском (Adam) по той же функции
     потерь, что и у нейросети. init=None - случайная фаза (классический метод),
     init=phi_nn - доводка ответа нейросети. tgt: (P, n, n).
@@ -70,7 +70,7 @@ def optimize_phase(tgt, prop: Fresnel, iters=300, lr=0.05, init=None, rois=ROI, 
     t = roi_crop(tgt.unsqueeze(0), rois)
     for it in range(iters):
         opt.zero_grad(set_to_none=True)
-        loss, _ = full_loss(prop.forward_phase(phi), t, rois, w_eff)
+        loss, _ = full_loss(prop.forward_phase(phi), t, rois, w_eff, w_frame)
         loss.backward()
         opt.step()
         if sched is not None:
@@ -90,7 +90,7 @@ def timed(fn, *a, **kw):
     return out, time.perf_counter() - t0
 
 
-def polish_quantized(phi, tgt, prop: Fresnel, rounds=600, rois=ROI, w_eff=0.0, verbose=False):
+def polish_quantized(phi, tgt, prop: Fresnel, rounds=600, rois=ROI, w_eff=0.0, verbose=False, w_frame=0.0):
     """Дискретная доводка уже 8-битного ДОЭ (то, что реально будет сдано в png).
 
     Квантование фазы на 256 уровней - заметный источник ошибки (ИСС 0.9999 -> 0.998).
@@ -107,7 +107,7 @@ def polish_quantized(phi, tgt, prop: Fresnel, rounds=600, rois=ROI, w_eff=0.0, v
 
     def loss_of(u):
         with torch.no_grad():
-            return full_loss(prop.forward_phase(to_phi(u)[None]), t, rois, w_eff)[0].item()
+            return full_loss(prop.forward_phase(to_phi(u)[None]), t, rois, w_eff, w_frame)[0].item()
 
     def levels(p):                       # как phase_to_uint8, но на torch; 255 == 0 (это одна фаза)
         w = torch.remainder(p + math.pi, 2 * math.pi)
@@ -124,7 +124,7 @@ def polish_quantized(phi, tgt, prop: Fresnel, rounds=600, rois=ROI, w_eff=0.0, v
     k, fails = 256, 0
     for r in range(rounds):
         ph = to_phi(u)[None].requires_grad_(True)
-        lo, _ = full_loss(prop.forward_phase(ph), t, rois, w_eff)
+        lo, _ = full_loss(prop.forward_phase(ph), t, rois, w_eff, w_frame)
         g, = torch.autograd.grad(lo, ph)
         g = g[0].ravel()
         idx = torch.topk(g.abs(), k).indices
