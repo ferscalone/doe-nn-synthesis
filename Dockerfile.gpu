@@ -1,0 +1,23 @@
+# Вариант с NVIDIA GPU (нужны драйвер NVIDIA и NVIDIA Container Toolkit).
+# Сборка:  docker build -f Dockerfile.gpu -t doe-nn-gpu .
+# Запуск:  docker run --rm --gpus all -v <вход>:/data/input -v <выход>:/data/output doe-nn-gpu
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    MPLBACKEND=Agg
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY doe/ doe/
+COPY weights/ weights/
+COPY examples/ examples/
+COPY run.py synthesize.py benchmark.py selfcheck.py ./
+
+ENTRYPOINT ["python", "run.py"]
+CMD ["--input", "/data/input", "--output", "/data/output"]

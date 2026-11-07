@@ -1,0 +1,15 @@
+.git
+**/__pycache__
+*.pyc
+notebooks/
+dataset/
+training/
+docs/
+scripts/
+runs/
+data/
+results*/
+bench/
+output/
+input/
+*.zip

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+runs/
+data/
+output/
+input/
+results*/
+bench/
+*.zip
+dataset/bank_gray64.npz

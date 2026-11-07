@@ -1,0 +1,4 @@
+# Дополнительно для обучения (train.py, export_dataset.py, notebooks/train_kaggle.ipynb).
+-r requirements.txt
+datasets>=2.19        # скачивание Tiny-ImageNet с HuggingFace
+torchvision           # только для запасного источника --data cifar10
