@@ -33,15 +33,15 @@ input/
 ```
 Linux / macOS:
 ```bash
-docker run --rm -v "$(pwd)/input:/data/input" -v "$(pwd)/output:/data/output" doe-nn
+docker run --rm -v "$(pwd)/input:/data/input" -v "$(pwd)/output:/data/output" doe-nn --mode fast
 ```
 Windows (PowerShell):
 ```powershell
-docker run --rm -v "${PWD}\input:/data/input" -v "${PWD}\output:/data/output" doe-nn
+docker run --rm -v "${PWD}\input:/data/input" -v "${PWD}\output:/data/output" doe-nn --mode fast
 ```
 Без подключённой папки контейнер прогонит встроенные примеры (`examples/`):
 ```bash
-docker run --rm doe-nn
+docker run --rm doe-nn --mode fast
 ```
 
 ### Что получается в `output/`
